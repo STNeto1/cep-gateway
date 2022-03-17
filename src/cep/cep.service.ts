@@ -1,12 +1,13 @@
 import { HttpService } from '@nestjs/axios'
-import { Injectable, Logger } from '@nestjs/common'
+import { BadRequestException, Injectable, Logger } from '@nestjs/common'
 import { InjectModel } from '@nestjs/mongoose'
 import { Model } from 'mongoose'
+import { firstValueFrom } from 'rxjs'
 
 import { SearchCepDto } from './dto/search-cep.dto'
 import { Cep, CepDocument } from './entities/cep.entity'
 
-type ViaCepResult = {
+type PublicCepDocument = {
   cep: string
   uf: string
   cidade: string
@@ -22,7 +23,7 @@ export class CepService {
     private httpService: HttpService
   ) {}
 
-  async search(data: SearchCepDto): Promise<CepDocument> {
+  async search(data: SearchCepDto): Promise<PublicCepDocument> {
     const cep = await this.cepModel
       .findOne({
         cep: data.cep
@@ -30,49 +31,51 @@ export class CepService {
       .exec()
 
     if (cep) {
-      return cep
+      return this.mapResult(cep)
     }
 
-    await this.searchViaCep(data, (value) => {
-      if (value) {
-        const newCep = new this.cepModel(value)
-        return newCep.save()
-      }
-    })
+    const viaCepResult = await this.searchViaCep(data)
 
-    return cep
+    if (viaCepResult) {
+      return this.mapResult(viaCepResult)
+    }
+
+    throw new BadRequestException('No CEP was found')
   }
 
-  async searchViaCep(
-    search: SearchCepDto,
-    cb: (value: ViaCepResult | null) => void
-  ) {
-    const observable = this.httpService.get(
-      `https://viacep.com.br/ws/${search.cep}/json/`
-    )
+  async searchViaCep(search: SearchCepDto): Promise<CepDocument | null> {
+    try {
+      const observable = this.httpService.get(
+        `https://viacep.com.br/ws/${search.cep}/json/`
+      )
 
-    observable.subscribe({
-      next({ data }) {
-        if (data.erro) {
-          return cb(null)
-        }
+      const { data } = await firstValueFrom(observable)
 
-        if (!data.erro) {
-          cb({
-            cep: search.cep,
-            uf: data.uf,
-            cidade: data.localidade,
-            bairro: data.bairro,
-            rua: data.logradouro ?? ''
-          })
-        }
-      },
-      error: (e) => {
-        this.logger.error(search)
-        this.logger.error(e)
-
-        cb(null)
+      if (data.erro) {
+        return null
       }
-    })
+
+      const model = new this.cepModel({
+        cep: search.cep,
+        uf: data.uf,
+        cidade: data.localidade,
+        bairro: data.bairro,
+        rua: data.logradouro ?? ''
+      })
+      return model.save()
+    } catch (error) {
+      this.logger.error(error.message)
+      return null
+    }
+  }
+
+  mapResult(data: CepDocument): PublicCepDocument {
+    return {
+      cep: data.cep,
+      uf: data.uf,
+      cidade: data.cidade,
+      bairro: data.bairro,
+      rua: data.rua
+    }
   }
 }
